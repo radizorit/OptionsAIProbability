@@ -10,6 +10,32 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+function getClientIp(req) {
+  const xf = req.headers['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.length > 0) return xf.split(',')[0].trim();
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+// Minimal in-memory rate limit for chat (per process)
+const chatRate = new Map(); // ip -> { count, resetAtMs }
+function chatRateLimit(req, res, next) {
+  const ip = getClientIp(req);
+  const now = Date.now();
+  const windowMs = 60_000;
+  const max = 20; // 20 req/min per IP (tweak as needed)
+  const entry = chatRate.get(ip) || { count: 0, resetAtMs: now + windowMs };
+  if (now > entry.resetAtMs) {
+    entry.count = 0;
+    entry.resetAtMs = now + windowMs;
+  }
+  entry.count += 1;
+  chatRate.set(ip, entry);
+  if (entry.count > max) {
+    return res.status(429).json({ error: 'Rate limit exceeded. Please wait a minute and try again.' });
+  }
+  next();
+}
+
 // Helper function to check if market is open (9:30 AM - 4:00 PM ET, Mon-Fri)
 function isMarketOpen() {
   const now = new Date();
@@ -62,6 +88,99 @@ function calculateToBreakeven(currentPrice, breakevenPrice) {
   return ((breakevenPrice - currentPrice) / currentPrice) * 100;
 }
 
+function safeNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeChange(current, base) {
+  const c = safeNumber(current);
+  const b = safeNumber(base);
+  if (c === null || b === null) return { change: null, changePercent: null };
+  const change = c - b;
+  const changePercent = b === 0 ? null : (change / b) * 100;
+  return { change, changePercent };
+}
+
+async function fetchUnderlying(ticker, apiKey) {
+  // Prefer the stock snapshot endpoint because it provides prevDay/day/lastTrade in one call.
+  // https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}
+  const url = `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}?apiKey=${apiKey}`;
+  const res = await fetch(url);
+  const marketOpen = isMarketOpen();
+
+  // Many Polygon plans are not entitled to the snapshot endpoint. If so, fall back to prev close.
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+
+    // Fallback: previous day's aggregate close (commonly entitled).
+    // https://api.polygon.io/v2/aggs/ticker/{ticker}/prev
+    const prevUrl = `https://api.polygon.io/v2/aggs/ticker/${ticker}/prev?apiKey=${apiKey}`;
+    const prevRes = await fetch(prevUrl);
+    if (!prevRes.ok) {
+      const prevText = await prevRes.text().catch(() => '');
+      throw new Error(
+        `Polygon underlying error: snapshot ${res.status}${text ? ` - ${text}` : ''}; prev ${prevRes.status}${prevText ? ` - ${prevText}` : ''}`
+      );
+    }
+    const prevData = await prevRes.json();
+    const prevClose = safeNumber(prevData?.results?.[0]?.c);
+    return {
+      ticker,
+      marketOpen,
+      prevClose,
+      dayClose: null,
+      lastTrade: null,
+      price: prevClose,
+      todayChange: null,
+      todayChangePercent: null,
+      overnightChange: null,
+      overnightChangePercent: null,
+      source: `polygon_prev_v2_fallback_from_snapshot_${res.status}`,
+    };
+  }
+
+  const data = await res.json();
+  const t = data?.ticker;
+
+  const prevClose = safeNumber(t?.prevDay?.c);
+  const dayClose = safeNumber(t?.day?.c);
+  const lastTrade = safeNumber(t?.lastTrade?.p);
+
+  // Price heuristic:
+  // - During market hours, prefer lastTrade if available.
+  // - Outside market hours, prefer lastTrade if it differs from dayClose (after-hours), else dayClose.
+  // - Fallback to prevClose.
+  let price = null;
+  if (lastTrade !== null && (marketOpen || (dayClose !== null && lastTrade !== dayClose))) {
+    price = lastTrade;
+  } else if (dayClose !== null) {
+    price = dayClose;
+  } else if (prevClose !== null) {
+    price = prevClose;
+  }
+
+  // Robinhood-style breakdown approximation:
+  // - Today: regular session move = dayClose - prevClose
+  // - Overnight: after-hours move = lastTrade - dayClose
+  const todayMove = computeChange(dayClose, prevClose);
+  const overnightMove = computeChange(lastTrade, dayClose);
+
+  return {
+    ticker,
+    marketOpen,
+    prevClose,
+    dayClose,
+    lastTrade,
+    price,
+    todayChange: todayMove.change,
+    todayChangePercent: todayMove.changePercent,
+    overnightChange: overnightMove.change,
+    overnightChangePercent: overnightMove.changePercent,
+    source: 'polygon_snapshot_v2',
+  };
+}
+
 // API endpoint to get options chain
 app.get('/api/options', async (req, res) => {
   try {
@@ -78,55 +197,14 @@ app.get('/api/options', async (req, res) => {
       return res.status(500).json({ error: 'API key not configured' });
     }
 
-    // First, fetch underlying price to determine which strikes we need
-    const marketOpen = isMarketOpen();
-    let underlyingPrice = null;
-    try {
-      const underlyingUrl = `https://api.polygon.io/v2/aggs/ticker/${ticker}/prev?apiKey=${API_KEY}`;
-      console.log('\n=== Fetching Underlying Price First ===');
-      console.log(`curl -X GET "${underlyingUrl}"`);
-
-      const quoteResponse = await fetch(underlyingUrl);
-      if (quoteResponse.ok) {
-        const quoteData = await quoteResponse.json();
-        if (quoteData.results && quoteData.results.length > 0) {
-          if (marketOpen && quoteData.results[0].bp !== undefined && quoteData.results[0].bp !== null) {
-            underlyingPrice = quoteData.results[0].bp;
-          } else {
-            underlyingPrice = quoteData.results[0].c;
-          }
-          console.log(`Underlying price: ${underlyingPrice}`);
-        }
-      }
-
-      // Fallback: try the snapshot endpoint if prev didn't work
-      if (!underlyingPrice) {
-        const snapshotResponse = await fetch(
-          `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}?apiKey=${API_KEY}`
-        );
-        if (snapshotResponse.ok) {
-          const snapshotData = await snapshotResponse.json();
-          if (snapshotData.ticker?.lastQuote) {
-            const quote = snapshotData.ticker.lastQuote;
-            if (marketOpen && quote.bp) {
-              underlyingPrice = quote.bp;
-            } else if (snapshotData.ticker.day?.c) {
-              underlyingPrice = snapshotData.ticker.day.c;
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error fetching underlying price:', error);
-    }
+    // Fetch underlying snapshot (price + today/overnight breakdown)
+    const underlying = await fetchUnderlying(ticker, API_KEY);
+    const marketOpen = underlying.marketOpen;
+    const underlyingPrice = underlying.price;
 
     // Use the contracts endpoint to get ALL available strikes for this expiration
     // This gives us all strikes, not just ones with recent activity
     const contractsUrl = `https://api.polygon.io/v3/reference/options/contracts?underlying_ticker=${ticker}&expiration_date=${expirationDate}&contract_type=${contractType}&limit=1000&apiKey=${API_KEY}`;
-
-    console.log('\n=== Polygon Contracts API Request (All Strikes) ===');
-    console.log(`curl -X GET "${contractsUrl}"`);
-    console.log('===================================================\n');
 
     let contractsResponse = await fetch(contractsUrl);
     let allContracts = [];
@@ -134,17 +212,10 @@ app.get('/api/options', async (req, res) => {
 
     if (contractsResponse.ok) {
       const contractsData = await contractsResponse.json();
-      console.log('\n=== Contracts API Response ===');
-      console.log(`Status: ${contractsResponse.status}`);
-      console.log(`Total contracts: ${contractsData.results ? contractsData.results.length : 0}`);
 
       if (contractsData.results && contractsData.results.length > 0) {
         allContracts = contractsData.results;
-        console.log(`\nAll available strikes from contracts endpoint:`);
         const allStrikes = allContracts.map(c => c.strike_price).sort((a, b) => a - b);
-        console.log(`Strikes: ${allStrikes.join(', ')}`);
-        console.log(`Total strikes: ${allStrikes.length}`);
-        console.log(`Range: ${allStrikes[0]} to ${allStrikes[allStrikes.length - 1]}`);
 
         // If we have underlying price, filter to strikes around it
         if (underlyingPrice) {
@@ -155,52 +226,54 @@ app.get('/api/options', async (req, res) => {
           const selectedAbove = strikesAtOrAbove.slice(0, 10);
           const targetStrikes = [...selectedBelow, ...selectedAbove].sort((a, b) => a - b);
 
-          console.log(`\nTarget strikes around ${underlyingPrice}: ${targetStrikes.join(', ')}`);
-
           // Filter contracts to only those with target strikes
           allContracts = allContracts.filter(c => targetStrikes.includes(c.strike_price));
-          console.log(`Filtered to ${allContracts.length} contracts with target strikes`);
         }
       }
-      console.log('============================\n');
-    } else {
-      console.log(`Contracts API returned status ${contractsResponse.status}`);
     }
 
-    // Now fetch snapshot data - we need to paginate through all results
+    // Now fetch snapshot data (pricing) - filter by expiration + type to reduce pagination
     // The snapshot endpoint uses pagination with next_url cursor
-    const polygonUrl = `https://api.polygon.io/v3/snapshot/options/${ticker}?apiKey=${API_KEY}`;
-
-    console.log('\n=== Polygon Snapshot API Request (For Pricing Data) ===');
-    console.log(`curl -X GET "${polygonUrl}"`);
-    console.log('==========================================================\n');
+    const polygonUrl =
+      `https://api.polygon.io/v3/snapshot/options/${ticker}` +
+      `?expiration_date=${encodeURIComponent(expirationDate)}` +
+      `&contract_type=${encodeURIComponent(contractType)}` +
+      `&limit=250` +
+      `&apiKey=${API_KEY}`;
 
     let allSnapshotResults = [];
     let nextUrl = polygonUrl;
     let pageCount = 0;
-    const maxPages = 100; // Safety limit to prevent infinite loops
+    const maxPages = 30; // Safety limit to prevent infinite loops (we're already filtered)
 
-    // Paginate through all results
+    // Determine target strikes if we have underlying price and contracts
+    let targetStrikesSet = null;
+    if (underlyingPrice && allContracts.length > 0) {
+      const allStrikes = allContracts.map(c => c.strike_price);
+      const strikesBelow = allStrikes.filter(s => s < underlyingPrice).sort((a, b) => b - a);
+      const strikesAtOrAbove = allStrikes.filter(s => s >= underlyingPrice).sort((a, b) => a - b);
+      const selectedBelow = strikesBelow.slice(0, 10);
+      const selectedAbove = strikesAtOrAbove.slice(0, 10);
+      const targetStrikes = [...selectedBelow, ...selectedAbove];
+      targetStrikesSet = new Set(targetStrikes);
+    }
+
+    // Paginate through results, but stop early if we have all target strikes
     while (nextUrl && pageCount < maxPages) {
       pageCount++;
-      console.log(`Fetching page ${pageCount}...`);
 
       // Ensure API key is in the URL (next_url from Polygon doesn't include the API key)
       let urlToFetch = nextUrl;
       if (!urlToFetch.includes('apiKey=')) {
-        // If next_url doesn't have API key, append it
         const separator = urlToFetch.includes('?') ? '&' : '?';
         urlToFetch = `${urlToFetch}${separator}apiKey=${API_KEY}`;
-        console.log(`  Added API key to next_url`);
       }
-
-      console.log(`  Fetching: ${urlToFetch.substring(0, 150)}...`);
 
       const response = await fetch(urlToFetch);
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`  Error response: ${errorText}`);
+        console.error('Error fetching options snapshot:', errorText);
         throw new Error(`Polygon API error: ${response.status} - ${errorText}`);
       }
 
@@ -208,68 +281,45 @@ app.get('/api/options', async (req, res) => {
 
       if (data.results && data.results.length > 0) {
         allSnapshotResults = allSnapshotResults.concat(data.results);
-        console.log(`  Page ${pageCount}: Got ${data.results.length} results (total so far: ${allSnapshotResults.length})`);
+
+        // Check if we have all target strikes (if we're filtering by target strikes)
+        if (targetStrikesSet) {
+          const relevantResults = allSnapshotResults.filter(opt => {
+            return opt.details.expiration_date === expirationDate &&
+              opt.details.contract_type.toLowerCase() === contractType.toLowerCase() &&
+              targetStrikesSet.has(opt.details.strike_price);
+          });
+
+          const foundStrikes = new Set(relevantResults.map(r => r.details.strike_price));
+          const missingStrikes = [...targetStrikesSet].filter(s => !foundStrikes.has(s));
+
+          if (missingStrikes.length === 0) {
+            nextUrl = null; // Stop pagination
+            break;
+          }
+        }
       }
 
       // Check for next page
-      if (data.next_url) {
+      if (data.next_url && nextUrl) {
         nextUrl = data.next_url;
-        console.log(`  Has next page, continuing...`);
       } else {
-        console.log(`  No more pages. Total results: ${allSnapshotResults.length}`);
         nextUrl = null;
       }
     }
 
-    console.log(`\nFinished pagination. Total options fetched: ${allSnapshotResults.length}\n`);
-
     // Use the paginated results
     let data = { results: allSnapshotResults };
 
-    // Log full response structure
-    console.log('\n=== Polygon API Response (All Paginated Results) ===');
-    console.log(`Total results after pagination: ${data.results ? data.results.length : 0}`);
-
     if (data.results && data.results.length > 0) {
-      console.log(`\nFirst option sample (full object):`);
-      console.log(JSON.stringify(data.results[0], null, 2));
-
-      // Log all unique expiration dates
-      const expirationDates = [...new Set(data.results.map(o => o.details.expiration_date))].sort();
-      console.log(`\nAvailable expiration dates in response: ${expirationDates.join(', ')}`);
-
-      // Log all unique strikes for the requested expiration
-      const optionsForExpiration = data.results.filter(o =>
-        o.details.expiration_date === expirationDate
-      );
-      if (optionsForExpiration.length > 0) {
-        const strikes = [...new Set(optionsForExpiration.map(o => o.details.strike_price))].sort((a, b) => a - b);
-        console.log(`\nAll strikes for expiration ${expirationDate}: ${strikes.join(', ')}`);
-        console.log(`Strike range: ${strikes[0]} to ${strikes[strikes.length - 1]} (${strikes.length} total)`);
-      }
-    }
-    console.log('=====================================================\n');
-
-    if (data.results && data.results.length > 0) {
-      console.log(`Total options returned from Polygon snapshot: ${data.results.length}`);
-
       // If we have target contracts from the contracts endpoint, filter by those tickers
       // Otherwise, fall back to filtering by expiration date and contract type
       if (allContracts.length > 0) {
         const targetTickers = new Set(allContracts.map(c => c.ticker));
-        console.log(`\nFiltering snapshot data to match ${targetTickers.size} target contracts...`);
 
         filteredOptions = data.results.filter(option => {
           return targetTickers.has(option.details.ticker);
         });
-
-        console.log(`Found ${filteredOptions.length} matching options in snapshot data`);
-
-        // If we didn't find all contracts in snapshot, we might need to fetch their previous close data
-        if (filteredOptions.length < allContracts.length) {
-          console.log(`\n⚠️  Warning: Only found ${filteredOptions.length} of ${allContracts.length} target contracts in snapshot.`);
-          console.log(`   Some strikes may not have recent activity. We'll use what's available.`);
-        }
       } else {
         // Fallback: filter by expiration date and contract type
         filteredOptions = data.results.filter(option => {
@@ -279,48 +329,6 @@ app.get('/api/options', async (req, res) => {
           return optionExpiration === expirationDate &&
             optionType === contractType.toLowerCase();
         });
-      }
-
-      console.log(`Options after filtering by expiration ${expirationDate} and type ${contractType}: ${filteredOptions.length}`);
-
-      // Log detailed info about filtered options - sort by strike price ascending
-      if (filteredOptions.length > 0) {
-        // Sort by strike price descending for logging
-        filteredOptions.sort((a, b) => b.details.strike_price - a.details.strike_price);
-
-        const strikes = filteredOptions.map(o => o.details.strike_price);
-        console.log(`Available strikes from snapshot: ${strikes[0]} to ${strikes[strikes.length - 1]}`);
-        console.log(`\n=== Filtered Options Chain Results (Sorted Ascending by Strike) ===`);
-        filteredOptions.forEach((option, index) => {
-          console.log(`\nOption ${index + 1} - Strike ${option.details.strike_price}:`);
-          console.log(`  Ticker: ${option.details.ticker}`);
-          console.log(`  Expiration: ${option.details.expiration_date}`);
-          console.log(`  Type: ${option.details.contract_type}`);
-          console.log(`\n  === ALL PRICE DATA (for comparison with Robinhood) ===`);
-          console.log(`  day.close: ${option.day?.close ?? 'N/A'}`);
-          console.log(`  day.bid: ${option.day?.bid ?? 'N/A'}`);
-          console.log(`  day.ask: ${option.day?.ask ?? 'N/A'}`);
-          console.log(`  day.open: ${option.day?.open ?? 'N/A'}`);
-          console.log(`  day.high: ${option.day?.high ?? 'N/A'}`);
-          console.log(`  day.low: ${option.day?.low ?? 'N/A'}`);
-          console.log(`  day.last: ${option.day?.last ?? 'N/A'}`);
-          console.log(`  day.previous_close: ${option.day?.previous_close ?? 'N/A'}`);
-          console.log(`  day.vwap: ${option.day?.vwap ?? 'N/A'}`);
-          // Check if there are any other price fields
-          if (option.day) {
-            const allDayKeys = Object.keys(option.day);
-            const priceKeys = allDayKeys.filter(k =>
-              !['change', 'change_percent', 'volume', 'last_updated'].includes(k)
-            );
-            console.log(`  Other day fields: ${priceKeys.join(', ')}`);
-          }
-          console.log(`  ================================================`);
-          console.log(`  Volume: ${option.day?.volume || 0}`);
-          console.log(`  Open Interest: ${option.open_interest || 0}`);
-          console.log(`  IV: ${option.implied_volatility || 'N/A'}`);
-          console.log(`  Delta: ${option.greeks?.delta || 'N/A'}`);
-        });
-        console.log('\n=== End Filtered Options ===\n');
       }
     }
 
@@ -390,18 +398,6 @@ app.get('/api/options', async (req, res) => {
     // Sort by strike price descending (highest first)
     enrichedOptions.sort((a, b) => b.strikePrice - a.strikePrice);
 
-    console.log(`\n=== Final Enriched Options (Sorted Ascending by Strike) ===`);
-    enrichedOptions.forEach((opt, idx) => {
-      console.log(`\nStrike ${opt.strikePrice}:`);
-      console.log(`  optionPrice (used for calc): ${opt.optionPrice}`);
-      console.log(`  askPrice (display): ${opt.askPrice}`);
-      console.log(`  bidPrice: ${opt.bidPrice ?? 'N/A'}`);
-      console.log(`  open: ${opt.open}`);
-      console.log(`  high: ${opt.high}`);
-      console.log(`  low: ${opt.low}`);
-    });
-    console.log('===========================================================\n');
-
     // Filter to show 10 strikes above and 10 strikes below the market price
     let filteredEnrichedOptions = enrichedOptions;
     if (underlyingPrice && enrichedOptions.length > 0) {
@@ -414,11 +410,6 @@ app.get('/api/options', async (req, res) => {
         Math.abs(underlyingPrice - maxStrike)
       );
 
-      if (priceDiff > 50) {
-        console.warn(`⚠️  WARNING: Market price (${underlyingPrice}) is far from available strikes (${minStrike}-${maxStrike})`);
-        console.warn(`   Polygon snapshot may only return strikes with recent activity.`);
-        console.warn(`   Consider selecting a different expiration date that has strikes near the current price.`);
-      }
 
       // Separate strikes into those below and above the market price
       const strikesBelow = enrichedOptions.filter(opt => opt.strikePrice < underlyingPrice);
@@ -435,17 +426,12 @@ app.get('/api/options', async (req, res) => {
 
       // Combine and sort by strike price descending (highest first)
       filteredEnrichedOptions = [...selectedBelow, ...selectedAbove].sort((a, b) => b.strikePrice - a.strikePrice);
-
-      console.log(`Filtered options: showing ${filteredEnrichedOptions.length} strikes around market price ${underlyingPrice}`);
-      console.log(`  - ${selectedBelow.length} strikes below: ${selectedBelow.map(o => o.strikePrice).join(', ')}`);
-      console.log(`  - ${selectedAbove.length} strikes at/above: ${selectedAbove.map(o => o.strikePrice).join(', ')}`);
-    } else {
-      console.log(`No underlying price available or no options found. Showing all ${enrichedOptions.length} options.`);
     }
 
     res.json({
       options: filteredEnrichedOptions,
       underlyingPrice,
+      underlying,
       marketOpen,
     });
 
@@ -469,30 +455,63 @@ app.get('/api/expiration-dates', async (req, res) => {
       return res.status(500).json({ error: 'API key not configured' });
     }
 
-    const response = await fetch(
-      `https://api.polygon.io/v3/snapshot/options/${ticker}?apiKey=${API_KEY}`
-    );
+    // Use the contracts endpoint to get ALL available expiration dates
+    // This endpoint lists all contracts regardless of activity, giving us comprehensive date coverage
+    const contractsUrl = `https://api.polygon.io/v3/reference/options/contracts?underlying_ticker=${ticker}&limit=1000&apiKey=${API_KEY}`;
+    let expirationDatesSet = new Set();
+    let nextUrl = contractsUrl;
+    let pageCount = 0;
+    const maxPages = 100; // Paginate through contracts to get all dates
 
-    if (!response.ok) {
-      throw new Error(`Polygon API error: ${response.status}`);
+    // Paginate through all contracts to collect every unique expiration date
+    while (nextUrl && pageCount < maxPages) {
+      pageCount++;
+
+      let urlToFetch = nextUrl;
+      if (!urlToFetch.includes('apiKey=')) {
+        const separator = urlToFetch.includes('?') ? '&' : '?';
+        urlToFetch = `${urlToFetch}${separator}apiKey=${API_KEY}`;
+      }
+
+      const response = await fetch(urlToFetch);
+
+      if (!response.ok) {
+        throw new Error(`Polygon API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.results && data.results.length > 0) {
+        // Extract expiration dates from contracts
+        data.results.forEach(contract => {
+          if (contract.expiration_date) {
+            expirationDatesSet.add(contract.expiration_date);
+          }
+        });
+      }
+
+      if (data.next_url) {
+        nextUrl = data.next_url;
+      } else {
+        nextUrl = null;
+      }
     }
 
-    const data = await response.json();
-
-    if (!data.results || data.results.length === 0) {
+    // Use the Set we built during pagination
+    if (expirationDatesSet.size === 0) {
       return res.json({ expirationDates: [] });
     }
 
-    // Extract unique expiration dates and sort them
-    const expirationDates = [...new Set(
-      data.results.map(option => option.details.expiration_date)
-    )].sort();
+    const expirationDates = Array.from(expirationDatesSet).sort();
 
     // Format dates and calculate days until expiration
     const formattedDates = expirationDates.map(date => {
-      const expirationDate = new Date(date + 'T00:00:00');
+      // Parse date string (format: YYYY-MM-DD) and create Date object in UTC to avoid timezone issues
+      const [year, month, day] = date.split('-').map(Number);
+      const expirationDate = new Date(Date.UTC(year, month - 1, day));
       const today = new Date();
       today.setHours(0, 0, 0, 0);
+      today.setUTCHours(0, 0, 0, 0);
       const daysUntil = Math.ceil((expirationDate - today) / (1000 * 60 * 60 * 24));
 
       return {
@@ -500,7 +519,8 @@ app.get('/api/expiration-dates', async (req, res) => {
         formatted: expirationDate.toLocaleDateString('en-US', {
           month: 'long',
           day: 'numeric',
-          year: 'numeric'
+          year: 'numeric',
+          timeZone: 'UTC'
         }),
         daysUntil,
       };
@@ -511,6 +531,65 @@ app.get('/api/expiration-dates', async (req, res) => {
   } catch (error) {
     console.error('Error fetching expiration dates:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/chat', chatRateLimit, async (req, res) => {
+  try {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({
+        error: 'OPENAI_API_KEY is not configured on the server.',
+      });
+    }
+
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const { messages } = req.body || {};
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'Missing required field: messages[]' });
+    }
+
+    // Keep payload small and predictable
+    const trimmed = messages
+      .filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
+      .slice(-12)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const system = {
+      role: 'system',
+      content:
+        'You are an options analysis assistant. Be concise, quantify assumptions, and show calculations. ' +
+        'Provide a short disclaimer that this is not financial advice. ' +
+        'When asked, compare buy vs sell of the same contract (credit vs debit, win condition, breakeven) and estimate an implied probability using available context.',
+    };
+
+    const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [system, ...trimmed],
+        temperature: 0.4,
+      }),
+    });
+
+    if (!openaiRes.ok) {
+      const text = await openaiRes.text().catch(() => '');
+      return res.status(502).json({
+        error: `OpenAI error: ${openaiRes.status}${text ? ` - ${text}` : ''}`,
+      });
+    }
+
+    const data = await openaiRes.json();
+    const content = data?.choices?.[0]?.message?.content ?? '';
+    return res.json({ content });
+  } catch (error) {
+    console.error('Error in /api/chat:', error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
