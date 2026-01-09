@@ -1,0 +1,266 @@
+.app {
+  min-height: 100vh;
+  background-color: #0a0a0a;
+  color: #ffffff;
+  padding: 20px;
+}
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
+.header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stock-info {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.price-change {
+  color: #ef4444;
+  font-weight: 400;
+}
+
+.strategy-info {
+  font-size: 16px;
+  color: #a1a1aa;
+}
+
+.price-history-btn {
+  background-color: transparent;
+  border: 1px solid #3f3f46;
+  color: #ffffff;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.price-history-btn:hover {
+  background-color: #27272a;
+}
+
+.expand-icon {
+  font-size: 10px;
+}
+
+.controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.control-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.control-btn {
+  background-color: #27272a;
+  border: 1px solid #3f3f46;
+  color: #ffffff;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.control-btn:hover {
+  background-color: #3f3f46;
+}
+
+.control-btn.active {
+  background-color: #f97316;
+  border-color: #f97316;
+  color: #ffffff;
+}
+
+.icon {
+  font-size: 14px;
+}
+
+.ticker-input {
+  background-color: #27272a;
+  border: 1px solid #3f3f46;
+  color: #ffffff;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  width: 120px;
+}
+
+.ticker-input:focus {
+  outline: none;
+  border-color: #f97316;
+}
+
+.expiration-select {
+  background-color: #27272a;
+  border: 1px solid #3f3f46;
+  color: #ffffff;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  min-width: 200px;
+}
+
+.expiration-select:focus {
+  outline: none;
+  border-color: #f97316;
+}
+
+.error-message {
+  background-color: #7f1d1d;
+  border: 1px solid #991b1b;
+  color: #fca5a5;
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 24px;
+}
+
+.loading {
+  text-align: center;
+  padding: 40px;
+  color: #a1a1aa;
+  font-size: 16px;
+}
+
+.no-data {
+  text-align: center;
+  padding: 40px;
+  color: #a1a1aa;
+  font-size: 16px;
+}
+
+.options-table-container {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid #3f3f46;
+}
+
+.options-table {
+  width: 100%;
+  border-collapse: collapse;
+  background-color: #18181b;
+}
+
+.options-table thead {
+  background-color: #27272a;
+}
+
+.options-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 600;
+  color: #a1a1aa;
+  border-bottom: 1px solid #3f3f46;
+}
+
+.options-table td {
+  padding: 12px 16px;
+  font-size: 14px;
+  border-bottom: 1px solid #27272a;
+}
+
+.options-table tbody tr:hover {
+  background-color: #27272a;
+}
+
+.share-price-row {
+  position: relative;
+  height: 50px;
+}
+
+.share-price-indicator {
+  position: relative;
+  padding: 0 !important;
+  height: 50px;
+}
+
+.share-price-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: #f97316;
+  z-index: 1;
+}
+
+.share-price-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background-color: #f97316;
+  color: #ffffff;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+.price-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.add-btn {
+  background-color: transparent;
+  border: 1px solid #3f3f46;
+  color: #ffffff;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 300;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.add-btn:hover {
+  background-color: #f97316;
+  border-color: #f97316;
+}
+
+.positive {
+  color: #22c55e;
+}
+
+.negative {
+  color: #ef4444;
+}
