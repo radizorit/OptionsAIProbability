@@ -27,6 +27,8 @@ npm install
 3. Create a `.env` file (or copy from `.env.example`):
 ```bash
 POLYGON_API_KEY=your_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-4o-mini
 PORT=3001
 ```
 

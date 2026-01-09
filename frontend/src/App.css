@@ -10,6 +10,22 @@
   margin: 0 auto;
 }
 
+.app-title {
+  text-align: center;
+  margin-bottom: 30px;
+  padding-bottom: 20px;
+  border-bottom: 2px solid #3f3f46;
+}
+
+.app-title h1 {
+  font-size: 48px;
+  font-weight: 700;
+  color: #f97316;
+  margin: 0;
+  letter-spacing: 2px;
+  text-shadow: 0 2px 4px rgba(249, 115, 22, 0.3);
+}
+
 .header {
   display: flex;
   justify-content: space-between;
@@ -20,7 +36,51 @@
 .header-left {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+}
+
+.header-input-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.stock-price-info {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.stock-price-main {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.stock-price-sub {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.change-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.change-label {
+  color: #a1a1aa;
+  font-weight: 500;
+}
+
+.neutral {
+  color: #ffffff;
 }
 
 .stock-info {
@@ -74,6 +134,12 @@
   align-items: center;
 }
 
+.control-group.ticker-group {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
 .control-btn {
   background-color: #27272a;
   border: 1px solid #3f3f46;
@@ -103,6 +169,14 @@
   font-size: 14px;
 }
 
+.ticker-label {
+  color: #a1a1aa;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  display: block;
+}
+
 .ticker-input {
   background-color: #27272a;
   border: 1px solid #3f3f46;
@@ -110,7 +184,7 @@
   padding: 8px 12px;
   border-radius: 6px;
   font-size: 14px;
-  width: 120px;
+  width: 200px;
 }
 
 .ticker-input:focus {
@@ -161,6 +235,130 @@
   overflow-x: auto;
   border-radius: 8px;
   border: 1px solid #3f3f46;
+}
+
+.chatbox {
+  margin-top: 18px;
+  border: 1px solid #3f3f46;
+  border-radius: 10px;
+  background: #101013;
+  overflow: hidden;
+}
+
+.chatbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #27272a;
+  background: #141417;
+}
+
+.chatbox-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #ffffff;
+}
+
+.chatbox-clear {
+  background: transparent;
+  border: 1px solid #3f3f46;
+  color: #ffffff;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.chatbox-clear:hover {
+  background: #27272a;
+}
+
+.chatbox-messages {
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chatmsg {
+  border: 1px solid #27272a;
+  border-radius: 10px;
+  padding: 10px 10px;
+  background: #0f0f12;
+}
+
+.chatmsg-user {
+  border-color: rgba(249, 115, 22, 0.35);
+}
+
+.chatmsg-assistant {
+  border-color: rgba(161, 161, 170, 0.35);
+}
+
+.chatmsg-role {
+  font-size: 11px;
+  color: #a1a1aa;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+}
+
+.chatmsg-content {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #ffffff;
+}
+
+.chatbox-input {
+  border-top: 1px solid #27272a;
+  padding: 10px 12px;
+  background: #141417;
+}
+
+.chatbox-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  background: #0f0f12;
+  border: 1px solid #3f3f46;
+  border-radius: 10px;
+  color: #ffffff;
+  padding: 10px;
+  font-size: 13px;
+}
+
+.chatbox-textarea:focus {
+  outline: none;
+  border-color: #f97316;
+}
+
+.chatbox-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.chatbox-send {
+  background: #f97316;
+  border: 1px solid #f97316;
+  color: #ffffff;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chatbox-send:hover {
+  filter: brightness(1.05);
 }
 
 .options-table {
